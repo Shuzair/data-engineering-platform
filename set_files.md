@@ -677,6 +677,7 @@ features:
 ```bash
 #!/bin/bash
 # Module: Core Setup - Directory structure and basic files
+# PRODUCTION FIXED VERSION
 
 source "$SCRIPT_DIR/lib/common.sh"
 
@@ -686,6 +687,41 @@ log_section "Core Setup Module"
 create_directories() {
     log_info "Creating directory structure..."
     
+    # ============================================
+    # CRITICAL FIX #1: Docker Volume Pre-Creation
+    # MUST BE FIRST - These directories are required for bind mounts
+    # ============================================
+    log_info "Creating Docker volume directories (CRITICAL for bind mounts)..."
+    
+    # Create volume directories with proper permissions
+    mkdir -p docker/volumes/postgres_data
+    mkdir -p docker/volumes/postgres_airflow_data
+    mkdir -p docker/volumes/pgadmin_data
+    mkdir -p docker/volumes/spark_logs
+    
+    # Set base permissions
+    chmod 755 docker/volumes
+    
+    # FIX: pgAdmin specific permissions (runs as user 5050)
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux: Try to set proper ownership, fallback to 777
+        sudo chown -R 5050:5050 docker/volumes/pgadmin_data 2>/dev/null || {
+            log_warning "Could not set pgAdmin ownership, using permissive mode"
+            chmod 777 docker/volumes/pgadmin_data
+        }
+    else
+        # macOS/Windows: Use permissive permissions
+        chmod 777 docker/volumes/pgadmin_data
+    fi
+    
+    # PostgreSQL volumes need proper permissions
+    chmod 700 docker/volumes/postgres_data docker/volumes/postgres_airflow_data
+    
+    log_success "Docker volumes created with proper permissions"
+    
+    # ============================================
+    # Standard Directory Structure
+    # ============================================
     local directories=(
         "airflow/dags"
         "airflow/plugins"
@@ -715,7 +751,9 @@ create_directories() {
         "docker/postgres"
         "docker/pgadmin"
         "docker/airflow"
-        "backups"
+        "backups/daily"
+        "backups/weekly"
+        "backups/monthly"
         "scripts"
         "tests/unit"
         "tests/integration"
@@ -723,23 +761,19 @@ create_directories() {
         ".vscode"
         ".github/workflows"
         "docs"
-        "docker/volumes/postgres_data"
-        "docker/volumes/postgres_airflow_data"
-        "docker/volumes/pgadmin_data"
-        "docker/volumes/spark_logs"
     )
     
     for dir in "${directories[@]}"; do
         create_directory "$dir"
     done
     
-    # Create .gitkeep files
+    # Create .gitkeep files for empty directories
     find . -type d -empty -exec touch {}/.gitkeep \; 2>/dev/null
     
     log_success "Directory structure created"
 }
 
-# Create .gitignore
+# Create production-ready .gitignore
 create_gitignore() {
     log_info "Creating .gitignore..."
     
@@ -751,44 +785,52 @@ data/archive/*
 !data/**/.gitkeep
 
 # Backup files
-backups/*.dump
-backups/*.sql
-backups/*.tar.gz
-!backups/.gitkeep
+backups/**/*.dump
+backups/**/*.sql
+backups/**/*.tar.gz
+backups/**/*.gz
+!backups/**/.gitkeep
 
 # Environment files
 .env
-.env.local
+.env.*
 .platform_passwords
 *.env
+!.env.example
+
+# Docker volumes - NEVER commit these
+docker/volumes/postgres_data/*
+docker/volumes/postgres_airflow_data/*
+docker/volumes/pgadmin_data/*
+docker/volumes/spark_logs/*
+!docker/volumes/**/.gitkeep
 
 # Airflow
 airflow/logs/*
 airflow/airflow.db
 airflow/*.cfg
 airflow/__pycache__/
+airflow/webserver_config.py
 !airflow/logs/.gitkeep
-
-# PostgreSQL
-postgres_data/
-postgres_airflow_data/
-pgadmin_data/
 
 # Jupyter
 notebooks/.ipynb_checkpoints/
 notebooks/*.html
 notebooks/*.pdf
+notebooks/*-checkpoint.ipynb
 
 # dbt
 dbt/target/
 dbt/dbt_modules/
 dbt/logs/
 dbt/.user.yml
+dbt/profiles.yml
 
 # Spark
 spark/logs/*
 spark/metastore_db/
 spark/spark-warehouse/
+spark/derby.log
 *.pyc
 !spark/logs/.gitkeep
 
@@ -807,18 +849,13 @@ env/
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
+!.vscode/launch.json
 .idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Docker
-docker-compose.override.yml
-.docker/
 
 # Temporary files
 *.tmp
@@ -826,6 +863,21 @@ docker-compose.override.yml
 *.log
 *.pid
 *.lock
+*.out
+
+# Docker
+docker-compose.override.yml
+.docker/
+
+# Security - NEVER commit secrets
+*.pem
+*.key
+*.crt
+*.p12
+*_rsa
+*_dsa
+*_ecdsa
+*_ed25519
 
 # Keep directory structure
 !.gitkeep
@@ -834,16 +886,99 @@ EOF
     log_success ".gitignore created"
 }
 
-# Initialize git repository
+# Create .env.example for documentation
+create_env_example() {
+    log_info "Creating .env.example..."
+    
+    cat > .env.example << 'EOF'
+# Example environment file - Copy to .env and update values
+# NEVER commit .env file with real passwords!
+
+# Platform
+PLATFORM_NAME=data-engineering-platform
+PLATFORM_VERSION=2.0.0
+PLATFORM_ENV=development
+
+# PostgreSQL - CHANGE THESE IN PRODUCTION!
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=ChangeThisPassword123!
+POSTGRES_DB=datawarehouse
+
+# Airflow - CHANGE THESE IN PRODUCTION!
+AIRFLOW_DB_PASSWORD=ChangeThisPassword123!
+AIRFLOW_ADMIN_PASSWORD=ChangeThisPassword123!
+
+# Jupyter - CHANGE THIS IN PRODUCTION!
+JUPYTER_TOKEN=ChangeThisToken123!
+
+# pgAdmin - CHANGE THESE IN PRODUCTION!
+PGADMIN_DEFAULT_EMAIL=admin@yourdomain.com
+PGADMIN_DEFAULT_PASSWORD=ChangeThisPassword123!
+
+# Resource Limits (adjust based on your system)
+POSTGRES_MEMORY=2G
+AIRFLOW_WEBSERVER_MEMORY=2G
+SPARK_WORKER_MEMORY=4G
+EOF
+    
+    log_success ".env.example created"
+}
+
+# Initialize git repository with production practices
 init_git() {
     if [[ ! -d .git ]]; then
         log_info "Initializing git repository..."
         git init
-        git add .gitignore
-        git commit -m "Initial commit: Data Engineering Platform v2.0" 2>/dev/null || true
+        
+        # Configure git
+        git config core.autocrlf input
+        git config core.eol lf
+        
+        # Initial commit
+        git add .gitignore .env.example
+        git commit -m "Initial commit: Data Engineering Platform v2.0 - Production Ready" 2>/dev/null || true
+        
         log_success "Git repository initialized"
     else
         log_info "Git repository already exists"
+    fi
+}
+
+# Validate core setup
+validate_core_setup() {
+    log_info "Validating core setup..."
+    
+    local errors=0
+    
+    # Check critical directories
+    local critical_dirs=(
+        "docker/volumes/postgres_data"
+        "docker/volumes/postgres_airflow_data"
+        "docker/volumes/pgadmin_data"
+        "docker/volumes/spark_logs"
+        "airflow/dags"
+        "spark/jars"
+    )
+    
+    for dir in "${critical_dirs[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            log_error "Critical directory missing: $dir"
+            ((errors++))
+        fi
+    done
+    
+    # Check permissions
+    if [[ ! -w "docker/volumes" ]]; then
+        log_error "Docker volumes directory not writable"
+        ((errors++))
+    fi
+    
+    if [[ $errors -eq 0 ]]; then
+        log_success "Core setup validation passed"
+        return 0
+    else
+        log_error "Core setup validation failed with $errors errors"
+        return 1
     fi
 }
 
@@ -851,7 +986,9 @@ init_git() {
 main() {
     create_directories
     create_gitignore
+    create_env_example
     init_git
+    validate_core_setup
 }
 
 main
@@ -861,16 +998,55 @@ main
 ```bash
 #!/bin/bash
 # Module: Docker Setup - Docker Compose and environment configuration
+# PRODUCTION FIXED VERSION
 
 source "$SCRIPT_DIR/lib/common.sh"
 
 log_section "Docker Setup Module"
 
-# Generate .env file
+# ============================================
+# CRITICAL FIX: Verify Docker volumes exist
+# ============================================
+verify_docker_volumes() {
+    log_info "Verifying Docker volume directories..."
+    
+    local volume_dirs=(
+        "docker/volumes/postgres_data"
+        "docker/volumes/postgres_airflow_data"
+        "docker/volumes/pgadmin_data"
+        "docker/volumes/spark_logs"
+    )
+    
+    local missing=0
+    for dir in "${volume_dirs[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            log_warning "Creating missing volume directory: $dir"
+            mkdir -p "$dir"
+            ((missing++))
+        fi
+    done
+    
+    # Fix pgAdmin permissions
+    if [[ -d "docker/volumes/pgadmin_data" ]]; then
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            sudo chown -R 5050:5050 docker/volumes/pgadmin_data 2>/dev/null || chmod 777 docker/volumes/pgadmin_data
+        else
+            chmod 777 docker/volumes/pgadmin_data
+        fi
+    fi
+    
+    if [[ $missing -gt 0 ]]; then
+        log_warning "Created $missing missing volume directories"
+    else
+        log_success "All Docker volume directories verified"
+    fi
+}
+
+# Generate production-ready .env file
 generate_env_file() {
     log_info "Generating .env file..."
     
-	# Load or generate passwords
+    # Load or generate secure passwords
     load_or_generate_passwords
     
     # Get values from configuration or use generated passwords
@@ -882,13 +1058,17 @@ generate_env_file() {
     local pgadmin_email=$(get_config "security.pgadmin_email" "admin@admin.com")
     local pgadmin_password="${PGADMIN_PASSWORD}"
     
-    # Generate keys
+    # Generate cryptographic keys
     local fernet_key=$(generate_fernet_key)
     local secret_key=$(openssl rand -hex 32)
+    
+    # CRITICAL: Get current user UID for Airflow
+    local current_uid=$(id -u)
     
     cat > .env << EOF
 # Generated by Data Engineering Platform Setup
 # Date: $(date)
+# WARNING: NEVER commit this file to version control!
 
 # Platform
 PLATFORM_NAME=$(get_config "platform.name" "data-engineering-platform")
@@ -896,19 +1076,20 @@ PLATFORM_VERSION=$(get_config "platform.version" "2.0.0")
 PLATFORM_ENV=$(get_config "platform.environment" "development")
 
 # Versions
-POSTGRES_VERSION=$(get_config "versions.postgresql" "15.4-alpine")
-AIRFLOW_VERSION=$(get_config "versions.airflow" "2.8.1-python3.10")
+POSTGRES_VERSION=$(get_config "versions.postgresql" "16.1-alpine")
+AIRFLOW_VERSION=$(get_config "versions.airflow" "2.9.3-python3.11")
 SPARK_VERSION=$(get_config "versions.spark" "3.5.1")
 JUPYTER_VERSION=$(get_config "versions.jupyter" "spark-3.5.1")
-PGADMIN_VERSION=$(get_config "versions.pgadmin" "8.2")
+PGADMIN_VERSION=$(get_config "versions.pgadmin" "8.11")
 
 # PostgreSQL
 POSTGRES_USER=$(get_config "database.user" "postgres")
 POSTGRES_PASSWORD=${postgres_password}
 POSTGRES_DB=$(get_config "database.name" "datawarehouse")
 
-# Airflow
-AIRFLOW_UID=$(id -u)
+# Airflow - CRITICAL: UID must match current user
+AIRFLOW_UID=${current_uid}
+AIRFLOW_GID=0
 AIRFLOW_DB_PASSWORD=${airflow_db_password}
 AIRFLOW_FERNET_KEY=${fernet_key}
 AIRFLOW_SECRET_KEY=${secret_key}
@@ -931,7 +1112,7 @@ PORT_SPARK_MASTER_WEB=$(get_config "ports.spark_master_web" "8082")
 PORT_SPARK_MASTER=$(get_config "ports.spark_master" "7077")
 PORT_SPARK_WORKER_WEB=$(get_config "ports.spark_worker_web" "8083")
 
-# Resource Limits
+# Resource Limits - Production Optimized
 POSTGRES_MEMORY=$(get_config "resources.postgres.memory" "2G")
 POSTGRES_CPUS=$(get_config "resources.postgres.cpus" "1.0")
 POSTGRES_AIRFLOW_MEMORY=$(get_config "resources.postgres_airflow.memory" "1G")
@@ -944,27 +1125,39 @@ SPARK_MASTER_MEMORY=$(get_config "resources.spark.master.memory" "2G")
 SPARK_MASTER_CPUS=$(get_config "resources.spark.master.cpus" "1.0")
 SPARK_WORKER_MEMORY=$(get_config "resources.spark.worker.memory" "4G")
 SPARK_WORKER_CORES=2
+SPARK_EXECUTOR_MEMORY=3G
 JUPYTER_MEMORY=$(get_config "resources.jupyter.memory" "2G")
 JUPYTER_CPUS=$(get_config "resources.jupyter.cpus" "1.0")
 PGADMIN_MEMORY=$(get_config "resources.pgadmin.memory" "512M")
 PGADMIN_CPUS=$(get_config "resources.pgadmin.cpus" "0.5")
 
 # Features
-ENABLE_EXAMPLE_DAGS=$(get_config "features.enable_example_dags" "true")
+ENABLE_EXAMPLE_DAGS=$(get_config "features.enable_example_dags" "false")
+AIRFLOW_LOAD_EXAMPLES=false
+
+# System paths (for bind mounts)
+PROJECT_ROOT=${PWD}
 EOF
     
-    log_success ".env file generated"
+    # Set restrictive permissions on .env
+    chmod 600 .env
+    
+    log_success ".env file generated with secure permissions"
 }
 
-# Create docker-compose.yml
+# Create production-ready docker-compose.yml
 create_docker_compose() {
-    log_info "Creating docker-compose.yml..."
+    log_info "Creating production-ready docker-compose.yml..."
     
     cat > docker-compose.yml << 'EOF'
-version: '2.4'
+version: '3.8'
+
+# ============================================
+# PRODUCTION-READY DOCKER COMPOSE
+# ============================================
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:${AIRFLOW_VERSION:-2.8.1-python3.10}
+  image: apache/airflow:${AIRFLOW_VERSION:-2.9.3-python3.11}
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD}@postgres-airflow:5432/airflow
@@ -972,7 +1165,20 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: '${ENABLE_EXAMPLE_DAGS:-false}'
     AIRFLOW__WEBSERVER__RBAC: 'true'
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    # Database pool configuration
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_ENABLED: 'true'
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: 5
+    AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: 10
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: 1800
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING: 'true'
+    # Performance
+    AIRFLOW__CORE__PARALLELISM: 16
+    AIRFLOW__CORE__DAG_CONCURRENCY: 8
+    AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: 4
+    # Python path
     PYTHONPATH: '/opt/airflow/dags:/opt/dbt'
+    # PostgreSQL connection details
     POSTGRES_HOST: postgres
     POSTGRES_PORT: 5432
     POSTGRES_USER: ${POSTGRES_USER}
@@ -985,8 +1191,8 @@ x-airflow-common: &airflow-common
     - ./dbt:/opt/dbt
     - ./data:/data
     - ./spark/jobs:/opt/spark/jobs:ro
-  user: "${AIRFLOW_UID:-50000}:0"
-  depends_on:
+  user: "${AIRFLOW_UID:-50000}:${AIRFLOW_GID:-0}"
+  depends_on: &airflow-common-depends-on
     postgres-airflow:
       condition: service_healthy
     postgres:
@@ -995,19 +1201,32 @@ x-airflow-common: &airflow-common
     - data_network
 
 services:
+  # ============================================
+  # DATABASE SERVICES
+  # ============================================
+  
   postgres:
-    image: postgres:${POSTGRES_VERSION:-15.4-alpine}
+    image: postgres:${POSTGRES_VERSION:-16.1-alpine}
     container_name: postgres_dw
+    hostname: postgres
+    domainname: data.local
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-datawarehouse}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
+      # Performance tuning
+      POSTGRES_SHARED_BUFFERS: "512MB"
+      POSTGRES_WORK_MEM: "32MB"
+      POSTGRES_MAINTENANCE_WORK_MEM: "256MB"
+      POSTGRES_EFFECTIVE_CACHE_SIZE: "1GB"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
       - ./sql:/sql:ro
       - ./data:/data
+      - ./backups:/backups
     ports:
       - "${PORT_POSTGRES:-5432}:5432"
     command: 
@@ -1019,19 +1238,42 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
     networks:
-      - data_network
+      data_network:
+        aliases:
+          - postgres.data.local
+          - datawarehouse.local
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_MEMORY:-2G}
+          cpus: '${POSTGRES_CPUS:-1.0}'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
     mem_limit: ${POSTGRES_MEMORY:-2G}
-    cpus: ${POSTGRES_CPUS:-1.0}
+    memswap_limit: ${POSTGRES_MEMORY:-2G}
+    mem_reservation: 1G
+    shm_size: 256M
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
 
   postgres-airflow:
-    image: postgres:${POSTGRES_VERSION:-15.4-alpine}
+    image: postgres:${POSTGRES_VERSION:-16.1-alpine}
     container_name: postgres_airflow
+    hostname: postgres-airflow
+    domainname: data.local
     environment:
       POSTGRES_DB: airflow
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256"
     volumes:
       - postgres_airflow_data:/var/lib/postgresql/data
     healthcheck:
@@ -1039,69 +1281,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
     networks:
-      - data_network
+      data_network:
+        aliases:
+          - postgres-airflow.data.local
+    deploy:
+      resources:
+        limits:
+          memory: ${POSTGRES_AIRFLOW_MEMORY:-1G}
+          cpus: '${POSTGRES_AIRFLOW_CPUS:-0.5}'
+        reservations:
+          memory: 512M
+          cpus: '0.25'
     mem_limit: ${POSTGRES_AIRFLOW_MEMORY:-1G}
-    cpus: ${POSTGRES_AIRFLOW_CPUS:-0.5}
+    memswap_limit: ${POSTGRES_AIRFLOW_MEMORY:-1G}
+    mem_reservation: 512M
+    shm_size: 128M
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
 
-  pgadmin:
-    image: dpage/pgadmin4:${PGADMIN_VERSION:-8.2}
-    container_name: pgadmin4
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@admin.com}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
-      PGADMIN_CONFIG_SERVER_MODE: 'False'
-    ports:
-      - "${PORT_PGADMIN:-8081}:80"
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
-    depends_on:
-      - postgres
-    networks:
-      - data_network
-    deploy:
-      resources:
-        limits:
-          memory: ${PGADMIN_MEMORY:-512M}
-          cpus: '${PGADMIN_CPUS:-0.5}'
-    restart: unless-stopped
-
-  airflow-webserver:
-    <<: *airflow-common
-    container_name: airflow_webserver
-    command: webserver
-    ports:
-      - "${PORT_AIRFLOW:-8080}:8080"
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    deploy:
-      resources:
-        limits:
-          memory: ${AIRFLOW_WEBSERVER_MEMORY:-2G}
-          cpus: '${AIRFLOW_WEBSERVER_CPUS:-1.0}'
-
-  airflow-scheduler:
-    <<: *airflow-common
-    container_name: airflow_scheduler
-    command: scheduler
-    healthcheck:
-      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
-      interval: 30s
-      timeout: 10s
-      retries: 5
-    restart: always
-    deploy:
-      resources:
-        limits:
-          memory: ${AIRFLOW_SCHEDULER_MEMORY:-2G}
-          cpus: '${AIRFLOW_SCHEDULER_CPUS:-1.0}'
-
+  # ============================================
+  # AIRFLOW SERVICES
+  # ============================================
+  
+  # CRITICAL FIX: Enhanced airflow-init with retry logic
   airflow-init:
     <<: *airflow-common
     container_name: airflow_init
@@ -1109,6 +1318,25 @@ services:
     command:
       - -c
       - |
+        # Enhanced initialization with proper error handling
+        set -e
+        
+        # Wait for database to be REALLY ready
+        echo "Waiting for Airflow database to be ready..."
+        for i in {1..30}; do
+          if PGPASSWORD=${AIRFLOW_DB_PASSWORD} psql -h postgres-airflow -U airflow -d airflow -c "SELECT 1" >/dev/null 2>&1; then
+            echo "✅ Database is ready!"
+            break
+          fi
+          echo "⏳ Waiting for database... attempt $$i/30"
+          sleep 2
+          if [ $$i -eq 30 ]; then
+            echo "❌ Database not ready after 30 attempts"
+            exit 1
+          fi
+        done
+        
+        # Version check
         function ver() {
           printf "%04d%04d%04d%04d" $${1//./ }
         }
@@ -1117,63 +1345,149 @@ services:
         min_airflow_version=2.2.0
         min_airflow_version_comparable=$$(ver $${min_airflow_version})
         if (( airflow_version_comparable < min_airflow_version_comparable )); then
-          echo "ERROR: Airflow version $${airflow_version} is less than $${min_airflow_version}"
+          echo "❌ ERROR: Airflow version $${airflow_version} is less than $${min_airflow_version}"
           exit 1
         fi
+        
+        # Check UID
         if [[ -z "${AIRFLOW_UID}" ]]; then
-          echo "ERROR: AIRFLOW_UID not set"
+          echo "❌ ERROR: AIRFLOW_UID not set"
           exit 1
         fi
-        one_meg=1048576
-        mem_available=$$(($$(getconf _PHYS_PAGES) * $$(getconf PAGE_SIZE) / one_meg))
-        cpus_available=$$(grep -cE 'cpu[0-9]+' /proc/stat)
-        disk_available=$$(df / | tail -1 | awk '{print $$4}')
-        warning_resources="false"
-        if (( mem_available < 4000 )) ; then
-          echo "WARNING: Docker memory should be at least 4GB, currently $${mem_available}MB"
-          warning_resources="true"
-        fi
-        if (( cpus_available < 2 )); then
-          echo "WARNING: Docker CPUs should be at least 2, currently $${cpus_available}"
-          warning_resources="true"
-        fi
-        if (( disk_available < one_meg * 10 )); then
-          echo "WARNING: Docker disk should be at least 10GB free"
-          warning_resources="true"
-        fi
-        if [[ $${warning_resources} == "true" ]]; then
-          echo "WARNING: You have low resources"
-        fi
+        
+        # Create directories with proper permissions
+        echo "Creating Airflow directories..."
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+        
+        # Initialize database with retry logic
+        echo "Initializing Airflow database..."
+        for i in {1..3}; do
+          if airflow db init; then
+            echo "✅ Database initialized successfully"
+            break
+          else
+            echo "⚠️  Database init failed, retry $$i/3"
+            sleep 5
+            if [ $$i -eq 3 ]; then
+              echo "❌ Failed to initialize database after 3 attempts"
+              exit 1
+            fi
+          fi
+        done
+        
+        # Create admin user (will skip if exists)
+        echo "Creating admin user..."
+        airflow users create \
+          --username ${_AIRFLOW_WWW_USER_USERNAME:-admin} \
+          --password ${_AIRFLOW_WWW_USER_PASSWORD:-admin} \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com 2>/dev/null || echo "ℹ️  Admin user already exists"
+        
+        echo "✅ Airflow initialization complete!"
         exec /entrypoint airflow version
     environment:
       <<: *airflow-common-env
-      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_DB_MIGRATE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
-      _PIP_ADDITIONAL_REQUIREMENTS: ''
+      PGPASSWORD: ${AIRFLOW_DB_PASSWORD}
     user: "0:0"
     volumes:
       - ./airflow:/sources
-    environment:
-      <<: *airflow-common-env
-      _AIRFLOW_DB_UPGRADE: 'true'
-      _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
-      _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
-    user: "0:0"
-    restart: "no"
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+    networks:
+      - data_network
 
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow_webserver
+    hostname: airflow-webserver
+    command: webserver
+    ports:
+      - "${PORT_AIRFLOW:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${AIRFLOW_WEBSERVER_MEMORY:-2G}
+          cpus: '${AIRFLOW_WEBSERVER_CPUS:-1.0}'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    mem_limit: ${AIRFLOW_WEBSERVER_MEMORY:-2G}
+    memswap_limit: ${AIRFLOW_WEBSERVER_MEMORY:-2G}
+    mem_reservation: 1G
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow_scheduler
+    hostname: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${AIRFLOW_SCHEDULER_MEMORY:-2G}
+          cpus: '${AIRFLOW_SCHEDULER_CPUS:-1.0}'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    mem_limit: ${AIRFLOW_SCHEDULER_MEMORY:-2G}
+    memswap_limit: ${AIRFLOW_SCHEDULER_MEMORY:-2G}
+    mem_reservation: 1G
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+  # ============================================
+  # SPARK SERVICES
+  # ============================================
+  
   spark-master:
     image: bitnami/spark:${SPARK_VERSION:-3.5.1}
     container_name: spark_master
+    hostname: spark-master
+    domainname: data.local
     environment:
       - SPARK_MODE=master
       - SPARK_MASTER_HOST=spark-master
       - SPARK_MASTER_PORT=7077
       - SPARK_MASTER_WEBUI_PORT=8080
+      - SPARK_DAEMON_MEMORY=1g
+      - SPARK_MASTER_OPTS=-Xmx1g -XX:MaxPermSize=256m
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER}
@@ -1189,27 +1503,46 @@ services:
       - ./data:/opt/spark/data
       - spark_logs:/opt/spark/logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
+      interval: 30s
+      timeout: 10s
       retries: 5
+      start_period: 45s
     networks:
-      - data_network
+      data_network:
+        aliases:
+          - spark-master.data.local
     deploy:
       resources:
         limits:
           memory: ${SPARK_MASTER_MEMORY:-2G}
           cpus: '${SPARK_MASTER_CPUS:-1.0}'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    mem_limit: ${SPARK_MASTER_MEMORY:-2G}
+    memswap_limit: ${SPARK_MASTER_MEMORY:-2G}
+    mem_reservation: 1G
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
 
   spark-worker:
     image: bitnami/spark:${SPARK_VERSION:-3.5.1}
     container_name: spark_worker
+    hostname: spark-worker
+    domainname: data.local
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-4g}
+      - SPARK_WORKER_MEMORY=${SPARK_EXECUTOR_MEMORY:-3g}
       - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+      - SPARK_DAEMON_MEMORY=512m
+      - SPARK_WORKER_OPTS=-Xmx3g -XX:MaxPermSize=512m
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER}
@@ -1224,23 +1557,51 @@ services:
       - ./data:/opt/spark/data
       - spark_logs:/opt/spark/logs
     depends_on:
-      - spark-master
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
     networks:
-      - data_network
+      data_network:
+        aliases:
+          - spark-worker.data.local
     deploy:
       resources:
         limits:
           memory: ${SPARK_WORKER_MEMORY:-4G}
           cpus: '${SPARK_WORKER_CPUS:-2.0}'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+    mem_limit: ${SPARK_WORKER_MEMORY:-4G}
+    memswap_limit: ${SPARK_WORKER_MEMORY:-4G}
+    mem_reservation: 2G
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
 
+  # ============================================
+  # ANALYTICS SERVICES
+  # ============================================
+  
   jupyter:
     image: jupyter/pyspark-notebook:${JUPYTER_VERSION:-spark-3.5.1}
     container_name: jupyter_pyspark
+    hostname: jupyter
+    domainname: data.local
     environment:
       - JUPYTER_ENABLE_LAB=yes
       - SPARK_MASTER=spark://spark-master:7077
       - JUPYTER_TOKEN=${JUPYTER_TOKEN:-development}
+      - GRANT_SUDO=yes
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER}
@@ -1253,70 +1614,198 @@ services:
       - ./data:/home/jovyan/data:rw
       - ./spark/jars:/home/jovyan/spark/jars:ro
     networks:
-      - data_network
+      data_network:
+        aliases:
+          - jupyter.data.local
     depends_on:
       - spark-master
       - postgres
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8888/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     deploy:
       resources:
         limits:
           memory: ${JUPYTER_MEMORY:-2G}
           cpus: '${JUPYTER_CPUS:-1.0}'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    mem_limit: ${JUPYTER_MEMORY:-2G}
+    memswap_limit: ${JUPYTER_MEMORY:-2G}
+    mem_reservation: 1G
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+  # ============================================
+  # ADMIN SERVICES
+  # ============================================
+  
+  pgadmin:
+    image: dpage/pgadmin4:${PGADMIN_VERSION:-8.11}
+    container_name: pgadmin4
+    hostname: pgadmin
+    domainname: data.local
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@admin.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-admin}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: 'False'
+    ports:
+      - "${PORT_PGADMIN:-8081}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      - postgres
+      - postgres-airflow
+    healthcheck:
+      test: ["CMD", "wget", "-O", "-", "http://localhost:80/misc/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      data_network:
+        aliases:
+          - pgadmin.data.local
+    deploy:
+      resources:
+        limits:
+          memory: ${PGADMIN_MEMORY:-512M}
+          cpus: '${PGADMIN_CPUS:-0.5}'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    mem_limit: ${PGADMIN_MEMORY:-512M}
+    memswap_limit: ${PGADMIN_MEMORY:-512M}
+    mem_reservation: 256M
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+        compress: "true"
+
+# ============================================
+# NETWORKS - Enhanced configuration
+# ============================================
 
 networks:
   data_network:
+    name: data_platform_network
     driver: bridge
     ipam:
       driver: default
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
     driver_opts:
-      com.docker.network.bridge.name: data_platform_bridge
+      com.docker.network.bridge.name: br-data-platform
       com.docker.network.bridge.enable_ip_masquerade: "true"
       com.docker.network.bridge.enable_icc: "true"
       com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+      com.docker.network.driver.mtu: "1450"
+
+# ============================================
+# VOLUMES - Fixed bind mounts
+# ============================================
 
 volumes:
   postgres_data:
     driver: local
     driver_opts:
       type: none
-      device: ${PWD}/docker/volumes/postgres_data
+      device: ${PROJECT_ROOT}/docker/volumes/postgres_data
       o: bind
   postgres_airflow_data:
     driver: local
     driver_opts:
       type: none
-      device: ${PWD}/docker/volumes/postgres_airflow_data
+      device: ${PROJECT_ROOT}/docker/volumes/postgres_airflow_data
       o: bind
   pgadmin_data:
     driver: local
     driver_opts:
       type: none
-      device: ${PWD}/docker/volumes/pgadmin_data
+      device: ${PROJECT_ROOT}/docker/volumes/pgadmin_data
       o: bind
   spark_logs:
     driver: local
     driver_opts:
       type: none
-      device: ${PWD}/docker/volumes/spark_logs
-      o: bind
-  airflow_logs:
-    driver: local
-    driver_opts:
-      type: none
-      device: ${PWD}/airflow/logs
+      device: ${PROJECT_ROOT}/docker/volumes/spark_logs
       o: bind
 EOF
     
-    log_success "docker-compose.yml created"
+    log_success "Production-ready docker-compose.yml created"
+}
+
+# Validate Docker setup
+validate_docker_setup() {
+    log_info "Validating Docker setup..."
+    
+    local errors=0
+    
+    # Check docker-compose.yml syntax
+    if docker_compose config >/dev/null 2>&1; then
+        log_success "docker-compose.yml syntax valid"
+    else
+        log_error "docker-compose.yml has syntax errors"
+        docker_compose config
+        ((errors++))
+    fi
+    
+    # Check .env file
+    if [[ ! -f ".env" ]]; then
+        log_error ".env file not found"
+        ((errors++))
+    else
+        # Check for required variables
+        source .env
+        if [[ -z "$AIRFLOW_UID" ]]; then
+            log_error "AIRFLOW_UID not set in .env"
+            ((errors++))
+        fi
+        if [[ -z "$POSTGRES_PASSWORD" ]]; then
+            log_error "POSTGRES_PASSWORD not set in .env"
+            ((errors++))
+        fi
+    fi
+    
+    # Check volume directories
+    local volumes=("postgres_data" "postgres_airflow_data" "pgadmin_data" "spark_logs")
+    for vol in "${volumes[@]}"; do
+        if [[ ! -d "docker/volumes/$vol" ]]; then
+            log_error "Volume directory missing: docker/volumes/$vol"
+            ((errors++))
+        fi
+    done
+    
+    if [[ $errors -eq 0 ]]; then
+        log_success "Docker setup validation passed"
+        return 0
+    else
+        log_error "Docker setup validation failed with $errors errors"
+        return 1
+    fi
 }
 
 # Main execution
 main() {
+    verify_docker_volumes
     generate_env_file
     create_docker_compose
+    validate_docker_setup
 }
 
 main
@@ -1364,8 +1853,15 @@ effective_io_concurrency = 200
 max_parallel_workers_per_gather = 4
 max_parallel_workers = 8
 
-# Connections
-max_connections = 100
+# Connections and Pooling
+max_connections = 200
+superuser_reserved_connections = 3
+max_prepared_transactions = 100
+
+# Connection pooling settings (for pgBouncer compatibility)
+tcp_keepalives_idle = 60
+tcp_keepalives_interval = 10
+tcp_keepalives_count = 6
 
 # Logging
 logging_collector = on
@@ -1494,101 +1990,396 @@ main
 ```bash
 #!/bin/bash
 # Module: Airflow Setup - DAGs and configurations
+# PRODUCTION FIXED VERSION
 
 source "$SCRIPT_DIR/lib/common.sh"
 
 log_section "Airflow Setup Module"
 
-# Create example DAG
+# CRITICAL FIX: Set Airflow permissions FIRST
+set_airflow_permissions() {
+    log_info "Setting Airflow directory permissions..."
+    
+    # Get current user ID
+    local current_uid=$(id -u)
+    local current_gid=$(id -g)
+    
+    # Update .env with correct UID if needed
+    if [[ -f .env ]]; then
+        if grep -q "AIRFLOW_UID=" .env 2>/dev/null; then
+            # Update existing UID
+            sed -i.bak "s/AIRFLOW_UID=.*/AIRFLOW_UID=$current_uid/" .env
+            log_info "Updated AIRFLOW_UID to $current_uid"
+        else
+            # Add UID if missing
+            echo "AIRFLOW_UID=$current_uid" >> .env
+            log_info "Added AIRFLOW_UID=$current_uid to .env"
+        fi
+        
+        # Also ensure GID is set
+        if ! grep -q "AIRFLOW_GID=" .env 2>/dev/null; then
+            echo "AIRFLOW_GID=0" >> .env
+        fi
+    else
+        log_error ".env file not found - run Docker setup first"
+        exit 1
+    fi
+    
+    # Create Airflow directories with correct ownership
+    local airflow_dirs=(
+        "airflow/logs"
+        "airflow/dags"
+        "airflow/plugins"
+        "airflow/config"
+    )
+    
+    for dir in "${airflow_dirs[@]}"; do
+        mkdir -p "$dir"
+        
+        # Set permissions based on OS
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            # Linux: try to set ownership
+            sudo chown -R $current_uid:0 "$dir" 2>/dev/null || {
+                log_warning "Could not set ownership for $dir, using chmod instead"
+                chmod -R 775 "$dir"
+            }
+        else
+            # macOS/Windows: ensure write permissions
+            chmod -R 775 "$dir"
+        fi
+    done
+    
+    # Create .airflowignore to exclude test files
+    cat > airflow/dags/.airflowignore << 'EOF'
+# Ignore test files
+test_*.py
+*_test.py
+__pycache__/
+*.pyc
+.pytest_cache/
+EOF
+    
+    log_success "Airflow permissions configured"
+}
+
+# Create production-ready example DAG
 create_example_dag() {
     log_info "Creating example Airflow DAG..."
     
     cat > airflow/dags/example_pipeline.py << 'EOF'
 """
 Example data pipeline demonstrating platform capabilities
+Production-ready with error handling and best practices
 """
 from datetime import datetime, timedelta
+import logging
+from typing import Any, Dict
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.exceptions import AirflowException
+from airflow.models import Variable
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Default arguments with production settings
 default_args = {
     'owner': 'data-team',
     'depends_on_past': False,
     'email_on_failure': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5)
+    'email_on_retry': False,
+    'retries': 2,
+    'retry_delay': timedelta(minutes=5),
+    'retry_exponential_backoff': True,
+    'max_retry_delay': timedelta(minutes=30),
 }
 
-def check_database_connection(**context):
-    """Test database connectivity"""
-    hook = PostgresHook(postgres_conn_id='postgres_default')
-    conn = hook.get_conn()
-    cursor = conn.cursor()
-    cursor.execute("SELECT version();")
-    db_version = cursor.fetchone()[0]
-    print(f"Connected to: {db_version}")
-    return "Database connection successful"
+def check_database_connection(**context) -> Dict[str, Any]:
+    """
+    Test database connectivity with proper error handling
+    Returns connection details for downstream tasks
+    """
+    try:
+        hook = PostgresHook(postgres_conn_id='postgres_default')
+        conn = hook.get_conn()
+        cursor = conn.cursor()
+        
+        # Test connection and get stats
+        cursor.execute("""
+            SELECT 
+                version() as version,
+                current_database() as database,
+                current_user as user,
+                pg_database_size(current_database()) as db_size
+        """)
+        result = cursor.fetchone()
+        
+        connection_info = {
+            'version': result[0],
+            'database': result[1],
+            'user': result[2],
+            'db_size_mb': result[3] / (1024 * 1024)
+        }
+        
+        logger.info(f"Database connection successful: {connection_info['database']}")
+        logger.info(f"PostgreSQL version: {connection_info['version']}")
+        logger.info(f"Database size: {connection_info['db_size_mb']:.2f} MB")
+        
+        cursor.close()
+        conn.close()
+        
+        # Push to XCom for downstream tasks
+        context['task_instance'].xcom_push(key='db_info', value=connection_info)
+        
+        return connection_info
+        
+    except Exception as e:
+        logger.error(f"Database connection failed: {str(e)}")
+        raise AirflowException(f"Cannot connect to database: {str(e)}")
 
-def generate_sample_data(**context):
-    """Generate sample data for testing"""
+def generate_sample_data(**context) -> str:
+    """
+    Generate sample data with error handling
+    Uses XCom to get database info from upstream task
+    """
     import pandas as pd
     import numpy as np
+    from pathlib import Path
     
-    dates = pd.date_range('2024-01-01', periods=100, freq='D')
-    data = {
-        'date': dates,
-        'sales': np.random.randint(1000, 5000, size=100),
-        'customers': np.random.randint(50, 200, size=100),
-        'region': np.random.choice(['North', 'South', 'East', 'West'], size=100)
-    }
-    df = pd.DataFrame(data)
-    df.to_csv('/data/raw/sample_sales.csv', index=False)
-    print(f"Generated {len(df)} records")
-    return "Sample data generated"
+    try:
+        # Get database info from upstream task
+        db_info = context['task_instance'].xcom_pull(
+            task_ids='check_database',
+            key='db_info'
+        )
+        logger.info(f"Generating data for database: {db_info['database']}")
+        
+        # Create data directory if not exists
+        data_dir = Path('/data/raw')
+        data_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate sample data
+        np.random.seed(42)  # For reproducibility
+        dates = pd.date_range('2024-01-01', periods=100, freq='D')
+        
+        data = {
+            'date': dates,
+            'sales': np.random.randint(1000, 5000, size=100),
+            'customers': np.random.randint(50, 200, size=100),
+            'region': np.random.choice(['North', 'South', 'East', 'West'], size=100),
+            'product_category': np.random.choice(['Electronics', 'Clothing', 'Food', 'Books'], size=100),
+            'revenue': np.round(np.random.uniform(10000, 50000, size=100), 2)
+        }
+        
+        df = pd.DataFrame(data)
+        
+        # Add calculated fields
+        df['avg_order_value'] = np.round(df['revenue'] / df['customers'], 2)
+        df['is_weekend'] = df['date'].dt.dayofweek.isin([5, 6])
+        
+        # Save to CSV
+        output_file = data_dir / f"sample_sales_{context['ds']}.csv"
+        df.to_csv(output_file, index=False)
+        
+        logger.info(f"Generated {len(df)} records")
+        logger.info(f"Data saved to: {output_file}")
+        
+        # Push file path to XCom
+        context['task_instance'].xcom_push(key='data_file', value=str(output_file))
+        
+        return str(output_file)
+        
+    except Exception as e:
+        logger.error(f"Data generation failed: {str(e)}")
+        raise AirflowException(f"Failed to generate sample data: {str(e)}")
 
+def validate_data(**context) -> bool:
+    """
+    Validate generated data quality
+    """
+    import pandas as pd
+    from pathlib import Path
+    
+    try:
+        # Get file path from upstream task
+        data_file = context['task_instance'].xcom_pull(
+            task_ids='generate_sample_data',
+            key='data_file'
+        )
+        
+        if not data_file or not Path(data_file).exists():
+            raise FileNotFoundError(f"Data file not found: {data_file}")
+        
+        # Load and validate data
+        df = pd.read_csv(data_file)
+        
+        validation_results = {
+            'row_count': len(df),
+            'null_count': df.isnull().sum().sum(),
+            'duplicate_count': df.duplicated().sum(),
+            'date_range_valid': True,
+            'numeric_ranges_valid': True
+        }
+        
+        # Check for nulls
+        if validation_results['null_count'] > 0:
+            logger.warning(f"Found {validation_results['null_count']} null values")
+        
+        # Check for duplicates
+        if validation_results['duplicate_count'] > 0:
+            logger.warning(f"Found {validation_results['duplicate_count']} duplicate rows")
+        
+        # Validate numeric ranges
+        if (df['sales'] < 0).any() or (df['customers'] < 0).any():
+            validation_results['numeric_ranges_valid'] = False
+            raise ValueError("Negative values found in sales or customers")
+        
+        # Validate date range
+        df['date'] = pd.to_datetime(df['date'])
+        if df['date'].min() < pd.Timestamp('2020-01-01'):
+            validation_results['date_range_valid'] = False
+            logger.warning("Dates outside expected range")
+        
+        logger.info(f"Validation completed: {validation_results}")
+        
+        # Push validation results to XCom
+        context['task_instance'].xcom_push(key='validation_results', value=validation_results)
+        
+        return all([
+            validation_results['row_count'] > 0,
+            validation_results['null_count'] == 0,
+            validation_results['numeric_ranges_valid'],
+            validation_results['date_range_valid']
+        ])
+        
+    except Exception as e:
+        logger.error(f"Data validation failed: {str(e)}")
+        raise AirflowException(f"Data validation failed: {str(e)}")
+
+# Create DAG
 with DAG(
     'example_pipeline',
     default_args=default_args,
-    description='Example data pipeline',
+    description='Production-ready example data pipeline',
     schedule_interval='@daily',
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    tags=['example', 'tutorial']
+    max_active_runs=1,
+    tags=['example', 'production', 'tutorial'],
+    doc_md="""
+    # Example Data Pipeline
+    
+    This DAG demonstrates production-ready patterns:
+    - Database connectivity checks
+    - Data generation and validation
+    - Error handling and retries
+    - XCom for task communication
+    - Logging best practices
+    
+    ## Tasks
+    1. **check_database**: Verify database connectivity
+    2. **create_tables**: Create necessary database tables
+    3. **generate_sample_data**: Generate sample sales data
+    4. **validate_data**: Validate data quality
+    5. **load_to_staging**: Load data to staging tables
+    """
 ) as dag:
     
+    # Task 1: Check database connection
     check_db = PythonOperator(
         task_id='check_database',
-        python_callable=check_database_connection
+        python_callable=check_database_connection,
+        doc_md="Verify database connectivity and get connection info"
     )
     
+    # Task 2: Create tables
     create_tables = PostgresOperator(
         task_id='create_tables',
         postgres_conn_id='postgres_default',
         sql="""
-        CREATE SCHEMA IF NOT EXISTS example;
+        -- Create schema if not exists
+        CREATE SCHEMA IF NOT EXISTS staging;
         
-        CREATE TABLE IF NOT EXISTS example.sales_data (
+        -- Create staging table with proper indexes
+        CREATE TABLE IF NOT EXISTS staging.sales_data (
             id SERIAL PRIMARY KEY,
             date DATE NOT NULL,
-            sales INTEGER,
-            customers INTEGER,
+            sales INTEGER CHECK (sales >= 0),
+            customers INTEGER CHECK (customers >= 0),
             region VARCHAR(50),
+            product_category VARCHAR(100),
+            revenue DECIMAL(12, 2),
+            avg_order_value DECIMAL(10, 2),
+            is_weekend BOOLEAN,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        -- Create indexes for performance
+        CREATE INDEX IF NOT EXISTS idx_sales_date ON staging.sales_data(date);
+        CREATE INDEX IF NOT EXISTS idx_sales_region ON staging.sales_data(region);
+        CREATE INDEX IF NOT EXISTS idx_sales_category ON staging.sales_data(product_category);
+        
+        -- Create data quality table
+        CREATE TABLE IF NOT EXISTS staging.data_quality_checks (
+            id SERIAL PRIMARY KEY,
+            check_date DATE NOT NULL,
+            table_name VARCHAR(100),
+            check_type VARCHAR(50),
+            check_result BOOLEAN,
+            details JSONB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        """
+        """,
+        doc_md="Create staging tables with proper schema and indexes"
     )
     
+    # Task 3: Generate sample data
     generate_data = PythonOperator(
         task_id='generate_sample_data',
-        python_callable=generate_sample_data
+        python_callable=generate_sample_data,
+        doc_md="Generate sample sales data for testing"
     )
     
-    check_db >> create_tables >> generate_data
+    # Task 4: Validate data
+    validate = PythonOperator(
+        task_id='validate_data',
+        python_callable=validate_data,
+        doc_md="Validate data quality before loading"
+    )
+    
+    # Task 5: Load to staging
+    load_to_staging = PostgresOperator(
+        task_id='load_to_staging',
+        postgres_conn_id='postgres_default',
+        sql="""
+        -- This would normally use COPY or bulk insert
+        -- For demo purposes, we're inserting sample data
+        INSERT INTO staging.sales_data (date, sales, customers, region, product_category, revenue)
+        SELECT 
+            CURRENT_DATE - (random() * 30)::int,
+            (random() * 4000 + 1000)::int,
+            (random() * 150 + 50)::int,
+            (ARRAY['North', 'South', 'East', 'West'])[floor(random() * 4 + 1)],
+            (ARRAY['Electronics', 'Clothing', 'Food', 'Books'])[floor(random() * 4 + 1)],
+            (random() * 40000 + 10000)::decimal(12,2)
+        FROM generate_series(1, 10);
+        
+        -- Log data quality check
+        INSERT INTO staging.data_quality_checks (check_date, table_name, check_type, check_result)
+        VALUES (CURRENT_DATE, 'staging.sales_data', 'row_count', true);
+        """,
+        doc_md="Load validated data to staging tables"
+    )
+    
+    # Define task dependencies
+    check_db >> create_tables >> generate_data >> validate >> load_to_staging
 EOF
     
-    log_success "Example DAG created"
+    log_success "Production-ready example DAG created"
 }
 
 # Create Airflow connections initialization script
@@ -1597,56 +2388,216 @@ create_connections_script() {
     
     cat > scripts/init-airflow-connections.sh << 'EOF'
 #!/bin/bash
-# Initialize Airflow connections
+# Initialize Airflow connections with error handling
+
+set -euo pipefail
 
 echo "🔗 Setting up Airflow connections..."
 
-# Wait for Airflow to be ready
-sleep 30
+# Wait for Airflow webserver to be ready
+echo "Waiting for Airflow webserver..."
+for i in {1..30}; do
+    if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health | grep -q "200"; then
+        echo "✅ Airflow is ready!"
+        break
+    fi
+    echo "⏳ Waiting for Airflow... attempt $i/30"
+    sleep 5
+    if [ $i -eq 30 ]; then
+        echo "❌ Airflow not ready after 30 attempts"
+        exit 1
+    fi
+done
 
 # Load environment variables
-source .env
+if [[ -f .env ]]; then
+    source .env
+else
+    echo "❌ .env file not found"
+    exit 1
+fi
 
-# Create PostgreSQL connection
+# Create PostgreSQL connection for main data warehouse
+echo "Creating postgres_default connection..."
 docker exec airflow_webserver airflow connections add \
     'postgres_default' \
     --conn-type 'postgres' \
     --conn-host 'postgres' \
-    --conn-schema "$POSTGRES_DB" \
-    --conn-login "$POSTGRES_USER" \
-    --conn-password "$POSTGRES_PASSWORD" \
+    --conn-schema "${POSTGRES_DB}" \
+    --conn-login "${POSTGRES_USER}" \
+    --conn-password "${POSTGRES_PASSWORD}" \
     --conn-port 5432 \
-    2>/dev/null || echo "Connection postgres_default already exists"
+    2>/dev/null || echo "ℹ️  Connection postgres_default already exists"
 
-echo "✅ Airflow connections configured"
+# Create Spark connection
+echo "Creating spark_default connection..."
+docker exec airflow_webserver airflow connections add \
+    'spark_default' \
+    --conn-type 'spark' \
+    --conn-host 'spark://spark-master' \
+    --conn-port 7077 \
+    2>/dev/null || echo "ℹ️  Connection spark_default already exists"
+
+# Create file system connection for data directory
+echo "Creating fs_default connection..."
+docker exec airflow_webserver airflow connections add \
+    'fs_default' \
+    --conn-type 'fs' \
+    --conn-extra '{"path": "/data"}' \
+    2>/dev/null || echo "ℹ️  Connection fs_default already exists"
+
+# Verify connections
+echo ""
+echo "📋 Verifying connections..."
+docker exec airflow_webserver airflow connections list 2>/dev/null | grep -E "postgres_default|spark_default|fs_default" || true
+
+echo ""
+echo "✅ Airflow connections configured successfully!"
+echo ""
+echo "📝 Available connections:"
+echo "  - postgres_default: PostgreSQL data warehouse"
+echo "  - spark_default: Spark cluster"
+echo "  - fs_default: File system (/data)"
 EOF
     
     chmod +x scripts/init-airflow-connections.sh
     log_success "Airflow connections script created"
 }
 
-# Set Airflow permissions
-set_airflow_permissions() {
-    log_info "Setting Airflow directory permissions..."
+# Create Airflow configuration file
+create_airflow_config() {
+    log_info "Creating Airflow configuration..."
     
-    # Get current user ID
-    local current_uid=$(id -u)
+    cat > airflow/config/airflow.cfg.template << 'EOF'
+# Airflow Production Configuration Template
+# Copy to airflow.cfg and customize as needed
+
+[core]
+# Executor
+executor = LocalExecutor
+
+# Parallelism
+parallelism = 16
+dag_concurrency = 8
+max_active_runs_per_dag = 4
+max_active_tasks_per_dag = 16
+
+# DAG Processing
+min_file_process_interval = 30
+dag_dir_list_interval = 60
+dagbag_import_timeout = 120
+
+# Task Processing
+task_runner = StandardTaskRunner
+killed_task_cleanup_time = 60
+
+[database]
+# Connection pooling
+sql_alchemy_pool_enabled = True
+sql_alchemy_pool_size = 5
+sql_alchemy_max_overflow = 10
+sql_alchemy_pool_recycle = 1800
+sql_alchemy_pool_pre_ping = True
+
+[scheduler]
+# Performance
+min_file_process_interval = 30
+dag_dir_list_interval = 60
+scheduler_heartbeat_sec = 5
+parsing_processes = 2
+max_dagruns_to_create_per_loop = 10
+max_tis_per_query = 512
+
+# Health check
+scheduler_health_check_threshold = 30
+scheduler_zombie_task_threshold = 300
+zombie_detection_interval = 300
+
+[webserver]
+# Server settings
+web_server_host = 0.0.0.0
+web_server_port = 8080
+web_server_worker_timeout = 120
+worker_refresh_interval = 30
+worker_refresh_batch_size = 1
+worker_class = sync
+
+# UI settings
+default_ui_timezone = UTC
+expose_config = False
+expose_hostname = False
+expose_stacktrace = False
+page_size = 100
+
+[logging]
+# Logging configuration
+base_log_folder = /opt/airflow/logs
+logging_level = INFO
+fab_logging_level = WARNING
+colored_console_log = False
+
+# Remote logging (optional)
+remote_logging = False
+
+[metrics]
+# StatsD metrics (optional)
+statsd_on = False
+statsd_host = localhost
+statsd_port = 8125
+statsd_prefix = airflow
+EOF
     
-    # Update .env with correct UID if needed
-    if grep -q "AIRFLOW_UID=50000" .env 2>/dev/null; then
-        sed -i.bak "s/AIRFLOW_UID=50000/AIRFLOW_UID=$current_uid/" .env
-        log_info "Updated AIRFLOW_UID to $current_uid"
+    log_success "Airflow configuration template created"
+}
+
+# Validate Airflow setup
+validate_airflow_setup() {
+    log_info "Validating Airflow setup..."
+    
+    local errors=0
+    
+    # Check if DAGs directory is writable
+    if [[ ! -w "airflow/dags" ]]; then
+        log_error "Airflow DAGs directory not writable"
+        ((errors++))
     fi
     
-    # Ensure directories are writable
-    chmod -R 775 airflow/ 2>/dev/null || true
+    # Check if example DAG exists
+    if [[ ! -f "airflow/dags/example_pipeline.py" ]]; then
+        log_error "Example DAG not found"
+        ((errors++))
+    fi
+    
+    # Check Python syntax of DAG
+    if command_exists python3; then
+        python3 -m py_compile airflow/dags/example_pipeline.py 2>/dev/null || {
+            log_error "Example DAG has Python syntax errors"
+            ((errors++))
+        }
+    fi
+    
+    # Check if connections script exists and is executable
+    if [[ ! -x "scripts/init-airflow-connections.sh" ]]; then
+        log_error "Airflow connections script not executable"
+        ((errors++))
+    fi
+    
+    if [[ $errors -eq 0 ]]; then
+        log_success "Airflow setup validation passed"
+        return 0
+    else
+        log_error "Airflow setup validation failed with $errors errors"
+        return 1
+    fi
 }
 
 # Main execution
 main() {
+    set_airflow_permissions
     create_example_dag
     create_connections_script
-    set_airflow_permissions
+    create_airflow_config
+    validate_airflow_setup
 }
 
 main
@@ -1656,115 +2607,420 @@ main
 ```bash
 #!/bin/bash
 # Module: Spark Setup - Configuration and example jobs
+# PRODUCTION FIXED VERSION
 
 source "$SCRIPT_DIR/lib/common.sh"
 
 log_section "Spark Setup Module"
 
-# Download JDBC driver
+# CRITICAL FIX: Download and validate JDBC driver
 download_jdbc_driver() {
-    log_info "Downloading PostgreSQL JDBC driver..."
+    log_info "Downloading PostgreSQL JDBC driver (CRITICAL for Spark-PostgreSQL connectivity)..."
     
-    local jdbc_version=$(get_config "versions.postgresql_jdbc" "42.6.0")
+    local jdbc_version=$(get_config "versions.postgresql_jdbc" "42.7.3")
     local jdbc_file="spark/jars/postgresql-${jdbc_version}.jar"
     local jdbc_url="https://jdbc.postgresql.org/download/postgresql-${jdbc_version}.jar"
     
-    download_file "$jdbc_url" "$jdbc_file"
+    # Create jars directory
+    mkdir -p spark/jars
+    
+    # Check if file already exists and is valid
+    if [[ -f "$jdbc_file" ]]; then
+        # Validate file size (should be > 1MB)
+        local file_size=$(stat -f%z "$jdbc_file" 2>/dev/null || stat -c%s "$jdbc_file" 2>/dev/null || echo "0")
+        if [[ $file_size -gt 1000000 ]]; then
+            log_success "JDBC driver already exists and is valid"
+            return 0
+        else
+            log_warning "JDBC driver exists but appears corrupted, re-downloading..."
+            rm -f "$jdbc_file"
+        fi
+    fi
+    
+    # Download with retry logic
+    local max_attempts=3
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        log_info "Download attempt $attempt/$max_attempts..."
+        
+        if command_exists wget; then
+            wget -q --show-progress --timeout=30 --tries=2 "$jdbc_url" -O "$jdbc_file" && break
+        elif command_exists curl; then
+            curl -L --progress-bar --max-time 30 --retry 2 "$jdbc_url" -o "$jdbc_file" && break
+        else
+            log_error "Neither wget nor curl is available"
+            return 1
+        fi
+        
+        ((attempt++))
+        if [[ $attempt -le $max_attempts ]]; then
+            log_warning "Download failed, retrying..."
+            sleep 2
+        fi
+    done
+    
+    # Validate downloaded file
+    if [[ ! -f "$jdbc_file" ]]; then
+        log_error "JDBC driver download failed after $max_attempts attempts"
+        log_error "This is CRITICAL - Spark will not be able to connect to PostgreSQL!"
+        log_info "You can manually download from: $jdbc_url"
+        log_info "And place it in: $jdbc_file"
+        return 1
+    fi
+    
+    # Validate file size
+    local file_size=$(stat -f%z "$jdbc_file" 2>/dev/null || stat -c%s "$jdbc_file" 2>/dev/null || echo "0")
+    if [[ $file_size -lt 1000000 ]]; then
+        log_error "Downloaded JDBC driver appears corrupted (size: $file_size bytes)"
+        rm -f "$jdbc_file"
+        return 1
+    fi
+    
+    # Set proper permissions
+    chmod 644 "$jdbc_file"
+    
+    # Create copies for different Spark contexts (master, worker, jupyter)
+    log_info "Creating JDBC driver copies for all Spark contexts..."
+    cp "$jdbc_file" "spark/jars/postgresql.jar" 2>/dev/null || true
+    
+    log_success "JDBC driver ready: $(ls -lh $jdbc_file | awk '{print $5}')"
+    return 0
 }
 
-# Create Spark configuration
+# Create Spark configuration with production settings
 create_spark_config() {
     log_info "Creating Spark configuration..."
     
     cat > spark/conf/spark-defaults.conf << 'EOF'
-# Spark Configuration
+# Spark Production Configuration
+# Optimized for data engineering workloads
 
+# Application Settings
 spark.app.name              DataEngineeringPlatform
 spark.master                spark://spark-master:7077
 
-# Memory
+# Memory Configuration
 spark.driver.memory         2g
-spark.executor.memory       2g
 spark.driver.maxResultSize  1g
+spark.executor.memory       3g
+spark.executor.memoryOverhead 512m
 
-# Parallelism
+# Java Options for Better Memory Management
+spark.driver.extraJavaOptions  -XX:+UseG1GC -XX:+UnlockDiagnosticVMOptions -XX:+G1SummarizeConcMark
+spark.executor.extraJavaOptions -XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35
+
+# Parallelism and Partitioning
 spark.default.parallelism   8
 spark.sql.shuffle.partitions 8
+spark.sql.files.maxPartitionBytes 134217728
+spark.sql.files.openCostInBytes 4194304
 
-# SQL
-spark.sql.adaptive.enabled  true
+# Adaptive Query Execution (Spark 3.0+)
+spark.sql.adaptive.enabled true
 spark.sql.adaptive.coalescePartitions.enabled true
+spark.sql.adaptive.coalescePartitions.minPartitionNum 1
+spark.sql.adaptive.coalescePartitions.initialPartitionNum 200
+spark.sql.adaptive.advisoryPartitionSizeInBytes 134217728
+spark.sql.adaptive.skewJoin.enabled true
+spark.sql.adaptive.localShuffleReader.enabled true
 
 # Serialization
 spark.serializer            org.apache.spark.serializer.KryoSerializer
 spark.kryoserializer.buffer.max 256m
+spark.kryoserializer.buffer 64k
 
-# Network
+# Network and Timeout
 spark.network.timeout       600s
+spark.rpc.askTimeout        600s
+spark.storage.blockManagerSlaveTimeoutMs 600000
+spark.shuffle.registration.timeout 600000
+spark.shuffle.io.connectionTimeout 600s
 
-# PostgreSQL
-spark.jars                  /opt/spark/jars/postgresql-42.6.0.jar
+# Shuffle Performance
+spark.shuffle.compress      true
+spark.shuffle.spill.compress true
+spark.io.compression.codec  lz4
+
+# SQL Performance
+spark.sql.autoBroadcastJoinThreshold 20971520
+spark.sql.broadcastTimeout 600
+spark.sql.crossJoin.enabled true
+spark.sql.cbo.enabled      true
+spark.sql.cbo.joinReorder.enabled true
+
+# PostgreSQL JDBC Configuration
+spark.jars                  /opt/spark/jars/postgresql-42.7.3.jar,/opt/spark/jars/postgresql.jar
+spark.driver.extraClassPath /opt/spark/jars/postgresql-42.7.3.jar
+spark.executor.extraClassPath /opt/spark/jars/postgresql-42.7.3.jar
+
+# Monitoring
+spark.eventLog.enabled      false
+spark.eventLog.dir          /opt/spark/logs
+spark.ui.retainedJobs      100
+spark.ui.retainedStages    100
+spark.ui.retainedTasks     500
+spark.worker.ui.retainedExecutors 50
+spark.worker.ui.retainedDrivers 50
+spark.sql.ui.retainedExecutions 50
+
+# Dynamic Allocation (disabled by default in standalone mode)
+spark.dynamicAllocation.enabled false
+
+# Speculation (helps with stragglers)
+spark.speculation          false
+spark.speculation.interval 100ms
+spark.speculation.multiplier 1.5
+spark.speculation.quantile 0.75
 EOF
     
     log_success "Spark configuration created"
 }
 
-# Create example Spark job
+# Create example Spark job with production patterns
 create_spark_job() {
     log_info "Creating example Spark job..."
     
     cat > spark/jobs/example_spark_job.py << 'EOF'
 """
-Example Spark job demonstrating PySpark capabilities
+Production-ready Spark job demonstrating best practices
 """
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, sum, avg, count
+from pyspark.sql.functions import (
+    col, sum, avg, count, max, min,
+    when, isnan, isnull, 
+    date_format, year, month, dayofweek
+)
+from pyspark.sql.types import *
 import sys
 import os
+import logging
+from datetime import datetime
+import json
 
-def main():
-    # Create Spark session
-    spark = SparkSession.builder \
-        .appName("ExampleSparkJob") \
-        .config("spark.jars", "/opt/spark/jars/postgresql-42.6.0.jar") \
-        .getOrCreate()
-    
-    spark.sparkContext.setLogLevel("INFO")
-    
-    # PostgreSQL connection
-    jdbc_url = f"jdbc:postgresql://postgres:5432/{os.getenv('POSTGRES_DB', 'datawarehouse')}"
-    connection_properties = {
-        "user": os.getenv('POSTGRES_USER', 'postgres'),
-        "password": os.getenv('POSTGRES_PASSWORD', 'SecurePass123!'),
-        "driver": "org.postgresql.Driver"
-    }
-    
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class SparkJobConfig:
+    """Configuration for Spark job"""
+    def __init__(self):
+        self.app_name = "ExampleSparkJob"
+        self.jdbc_url = f"jdbc:postgresql://postgres:5432/{os.getenv('POSTGRES_DB', 'datawarehouse')}"
+        self.connection_properties = {
+            "user": os.getenv('POSTGRES_USER', 'postgres'),
+            "password": os.getenv('POSTGRES_PASSWORD', 'SecurePass123!'),
+            "driver": "org.postgresql.Driver",
+            "fetchsize": "1000",
+            "batchsize": "1000",
+            "rewriteBatchedStatements": "true",
+            "stringtype": "unspecified"
+        }
+        self.spark_config = {
+            "spark.sql.execution.arrow.pyspark.enabled": "true",
+            "spark.sql.execution.arrow.maxRecordsPerBatch": "10000",
+            "spark.sql.adaptive.enabled": "true",
+            "spark.sql.adaptive.coalescePartitions.enabled": "true"
+        }
+
+def create_spark_session(config: SparkJobConfig) -> SparkSession:
+    """Create Spark session with proper configuration"""
     try:
-        # Read from PostgreSQL
+        builder = SparkSession.builder.appName(config.app_name)
+        
+        # Add JDBC driver
+        builder = builder.config("spark.jars", "/opt/spark/jars/postgresql-42.7.3.jar")
+        
+        # Add performance configurations
+        for key, value in config.spark_config.items():
+            builder = builder.config(key, value)
+        
+        spark = builder.getOrCreate()
+        spark.sparkContext.setLogLevel("WARN")
+        
+        logger.info(f"Spark session created: {spark.version}")
+        logger.info(f"Application ID: {spark.sparkContext.applicationId}")
+        
+        return spark
+    except Exception as e:
+        logger.error(f"Failed to create Spark session: {str(e)}")
+        raise
+
+def test_jdbc_connection(spark: SparkSession, config: SparkJobConfig) -> bool:
+    """Test JDBC connection to PostgreSQL"""
+    try:
+        # Test with a simple query
+        test_query = "(SELECT 1 as test) as t"
         df = spark.read.jdbc(
-            url=jdbc_url,
-            table="marts.dim_date",
-            properties=connection_properties
+            url=config.jdbc_url,
+            table=test_query,
+            properties=config.connection_properties
         )
+        result = df.collect()[0]['test']
+        logger.info(f"JDBC connection test successful: {result}")
+        return True
+    except Exception as e:
+        logger.error(f"JDBC connection test failed: {str(e)}")
+        return False
+
+def read_postgresql_table(spark: SparkSession, config: SparkJobConfig, table_name: str):
+    """Read table from PostgreSQL with partitioning for better performance"""
+    try:
+        # First, get row count for partitioning
+        count_query = f"(SELECT COUNT(*) as cnt FROM {table_name}) as count_table"
+        count_df = spark.read.jdbc(
+            url=config.jdbc_url,
+            table=count_query,
+            properties=config.connection_properties
+        )
+        row_count = count_df.collect()[0]['cnt']
+        logger.info(f"Table {table_name} has {row_count} rows")
         
-        print(f"Loaded {df.count()} records")
-        df.printSchema()
+        # Read with partitioning if table is large
+        if row_count > 10000:
+            # Use partitioned read for better performance
+            df = spark.read.jdbc(
+                url=config.jdbc_url,
+                table=table_name,
+                numPartitions=4,
+                properties=config.connection_properties
+            )
+        else:
+            # Simple read for small tables
+            df = spark.read.jdbc(
+                url=config.jdbc_url,
+                table=table_name,
+                properties=config.connection_properties
+            )
         
-        # Perform aggregations
-        summary = df.filter(col("year") == 2024) \
-            .groupBy("month") \
-            .agg(count("*").alias("days_count")) \
-            .orderBy("month")
+        # Cache if needed for multiple operations
+        df.cache()
         
-        summary.show()
+        logger.info(f"Successfully read {table_name}")
+        logger.info(f"Schema: {df.schema}")
         
-        print("Job completed successfully")
+        return df
+    except Exception as e:
+        logger.error(f"Failed to read table {table_name}: {str(e)}")
+        raise
+
+def perform_data_analysis(df):
+    """Perform sample data analysis"""
+    try:
+        # Basic statistics
+        logger.info("Calculating basic statistics...")
+        
+        # Row count
+        total_rows = df.count()
+        logger.info(f"Total rows: {total_rows}")
+        
+        # Schema analysis
+        logger.info(f"Columns: {df.columns}")
+        logger.info(f"Data types: {df.dtypes}")
+        
+        # Null value analysis
+        null_counts = df.select([
+            count(when(col(c).isNull(), c)).alias(c) 
+            for c in df.columns
+        ]).collect()[0]
+        
+        logger.info("Null value counts:")
+        for col_name in df.columns:
+            null_count = null_counts[col_name]
+            if null_count > 0:
+                logger.info(f"  {col_name}: {null_count} ({100*null_count/total_rows:.2f}%)")
+        
+        # If date columns exist, analyze date range
+        date_columns = [f.name for f in df.schema.fields if isinstance(f.dataType, DateType)]
+        for date_col in date_columns:
+            date_stats = df.select(
+                min(col(date_col)).alias('min_date'),
+                max(col(date_col)).alias('max_date')
+            ).collect()[0]
+            logger.info(f"Date range for {date_col}: {date_stats['min_date']} to {date_stats['max_date']}")
+        
+        return {
+            'total_rows': total_rows,
+            'columns': df.columns,
+            'null_counts': null_counts.asDict() if null_counts else {}
+        }
         
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Analysis failed: {str(e)}")
+        raise
+
+def write_results_to_postgresql(df, config: SparkJobConfig, table_name: str, mode: str = "append"):
+    """Write DataFrame back to PostgreSQL"""
+    try:
+        logger.info(f"Writing results to {table_name} with mode={mode}")
+        
+        df.write.jdbc(
+            url=config.jdbc_url,
+            table=table_name,
+            mode=mode,
+            properties=config.connection_properties
+        )
+        
+        logger.info(f"Successfully wrote {df.count()} rows to {table_name}")
+        
+    except Exception as e:
+        logger.error(f"Failed to write to {table_name}: {str(e)}")
+        raise
+
+def main():
+    """Main execution function"""
+    start_time = datetime.now()
+    logger.info(f"Starting Spark job at {start_time}")
+    
+    # Initialize configuration
+    config = SparkJobConfig()
+    
+    # Create Spark session
+    spark = create_spark_session(config)
+    
+    try:
+        # Test JDBC connection
+        if not test_jdbc_connection(spark, config):
+            raise Exception("Cannot connect to PostgreSQL")
+        
+        # Read from PostgreSQL
+        df = read_postgresql_table(spark, config, "marts.dim_date")
+        
+        # Perform analysis
+        analysis_results = perform_data_analysis(df)
+        
+        # Example transformation: Create monthly summary
+        if 'year' in df.columns and 'month' in df.columns:
+            monthly_summary = df.groupBy('year', 'month').agg(
+                count('*').alias('days_count'),
+                sum(when(col('is_weekend') == True, 1).otherwise(0)).alias('weekend_days'),
+                sum(when(col('is_weekend') == False, 1).otherwise(0)).alias('weekdays')
+            ).orderBy('year', 'month')
+            
+            logger.info("Monthly summary:")
+            monthly_summary.show(10)
+            
+            # Write results back (commented out to avoid creating tables in example)
+            # write_results_to_postgresql(monthly_summary, config, "marts.monthly_summary", "overwrite")
+        
+        # Success metrics
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        
+        logger.info("="*50)
+        logger.info(f"Job completed successfully!")
+        logger.info(f"Duration: {duration:.2f} seconds")
+        logger.info(f"Rows processed: {analysis_results['total_rows']}")
+        logger.info("="*50)
+        
+    except Exception as e:
+        logger.error(f"Job failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
     finally:
         spark.stop()
+        logger.info("Spark session closed")
 
 if __name__ == "__main__":
     main()
@@ -1773,11 +3029,134 @@ EOF
     log_success "Example Spark job created"
 }
 
+# Create Spark submit script
+create_spark_submit_script() {
+    log_info "Creating Spark submit script..."
+    
+    cat > scripts/run-spark-job.sh << 'EOF'
+#!/bin/bash
+# Submit Spark job to cluster
+
+set -euo pipefail
+
+# Default job
+JOB_FILE=${1:-"spark/jobs/example_spark_job.py"}
+
+if [[ ! -f "$JOB_FILE" ]]; then
+    echo "❌ Job file not found: $JOB_FILE"
+    echo "Usage: $0 [job_file.py]"
+    exit 1
+fi
+
+echo "🚀 Submitting Spark job: $JOB_FILE"
+
+# Load environment
+source .env
+
+# Check if Spark master is running
+if ! docker ps | grep -q spark_master; then
+    echo "❌ Spark master is not running"
+    echo "Start it with: docker-compose up -d spark-master spark-worker"
+    exit 1
+fi
+
+# Submit job
+docker exec spark_master spark-submit \
+    --master spark://spark-master:7077 \
+    --deploy-mode client \
+    --driver-memory 1g \
+    --executor-memory 2g \
+    --executor-cores 2 \
+    --num-executors 1 \
+    --conf spark.sql.execution.arrow.pyspark.enabled=true \
+    --conf spark.sql.adaptive.enabled=true \
+    --jars /opt/spark/jars/postgresql-42.7.3.jar \
+    "/opt/$(basename $JOB_FILE)"
+
+echo "✅ Spark job completed"
+EOF
+    
+    chmod +x scripts/run-spark-job.sh
+    log_success "Spark submit script created"
+}
+
+# Validate Spark setup
+validate_spark_setup() {
+    log_info "Validating Spark setup..."
+    
+    local errors=0
+    local warnings=0
+    
+    # CRITICAL: Check JDBC driver
+    local jdbc_file="spark/jars/postgresql-42.7.3.jar"
+    if [[ ! -f "$jdbc_file" ]]; then
+        log_error "CRITICAL: PostgreSQL JDBC driver not found at $jdbc_file"
+        log_error "Spark will NOT be able to connect to PostgreSQL!"
+        ((errors++))
+    else
+        local file_size=$(stat -f%z "$jdbc_file" 2>/dev/null || stat -c%s "$jdbc_file" 2>/dev/null || echo "0")
+        if [[ $file_size -lt 1000000 ]]; then
+            log_error "JDBC driver appears corrupted (size: $file_size bytes)"
+            ((errors++))
+        else
+            log_success "JDBC driver present and valid ($(ls -lh $jdbc_file | awk '{print $5}'))"
+        fi
+    fi
+    
+    # Check Spark configuration
+    if [[ ! -f "spark/conf/spark-defaults.conf" ]]; then
+        log_warning "Spark configuration not found"
+        ((warnings++))
+    fi
+    
+    # Check example job
+    if [[ ! -f "spark/jobs/example_spark_job.py" ]]; then
+        log_warning "Example Spark job not found"
+        ((warnings++))
+    else
+        # Validate Python syntax
+        if command_exists python3; then
+            python3 -m py_compile spark/jobs/example_spark_job.py 2>/dev/null || {
+                log_error "Example Spark job has Python syntax errors"
+                ((errors++))
+            }
+        fi
+    fi
+    
+    # Check submit script
+    if [[ ! -x "scripts/run-spark-job.sh" ]]; then
+        log_warning "Spark submit script not executable"
+        ((warnings++))
+    fi
+    
+    # Final verdict
+    if [[ $errors -eq 0 ]]; then
+        if [[ $warnings -eq 0 ]]; then
+            log_success "Spark setup validation passed perfectly"
+        else
+            log_success "Spark setup validation passed with $warnings warnings"
+        fi
+        return 0
+    else
+        log_error "Spark setup validation FAILED with $errors critical errors"
+        log_error "Fix these issues or Spark jobs will fail!"
+        return 1
+    fi
+}
+
 # Main execution
 main() {
-    download_jdbc_driver
+    # CRITICAL: Download JDBC driver first
+    if ! download_jdbc_driver; then
+        log_error "Failed to download JDBC driver - this is critical!"
+        log_error "Continuing setup but Spark WILL NOT work properly"
+        # Don't exit, let user fix manually
+    fi
+    
     create_spark_config
     create_spark_job
+    create_spark_submit_script
+    validate_spark_setup
 }
 
 main
@@ -2059,7 +3438,6 @@ else
     exit 1
 fi
 
-# Check services
 # Docker Compose wrapper function
 docker_compose() {
     if command -v docker-compose >/dev/null 2>&1; then
@@ -2106,10 +3484,129 @@ EOF
     log_success "Health check script created"
 }
 
+# Create production health check script
+create_production_health_check() {
+    log_info "Creating production health check script..."
+    
+    cat > scripts/production-health-check.sh << 'EOF'
+#!/bin/bash
+set -euo pipefail
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo "🏥 Production Health Check"
+echo "=========================="
+
+WARNINGS=0
+ERRORS=0
+
+# Check disk space
+DISK_USAGE=$(df /var/lib/docker 2>/dev/null | tail -1 | awk '{print $5}' | sed 's/%//' || echo "0")
+if [ "$DISK_USAGE" -gt 80 ]; then
+    echo -e "${YELLOW}⚠️  WARNING: Disk usage is ${DISK_USAGE}%${NC}"
+    ((WARNINGS++))
+elif [ "$DISK_USAGE" -gt 90 ]; then
+    echo -e "${RED}❌ CRITICAL: Disk usage is ${DISK_USAGE}%${NC}"
+    ((ERRORS++))
+else
+    echo -e "${GREEN}✅ Disk usage: ${DISK_USAGE}%${NC}"
+fi
+
+# Check memory
+MEM_AVAILABLE=$(free -m 2>/dev/null | grep "^Mem" | awk '{print $7}' || echo "999999")
+if [ "$MEM_AVAILABLE" -lt 500 ]; then
+    echo -e "${RED}❌ CRITICAL: Only ${MEM_AVAILABLE}MB memory available${NC}"
+    ((ERRORS++))
+elif [ "$MEM_AVAILABLE" -lt 1000 ]; then
+    echo -e "${YELLOW}⚠️  WARNING: Only ${MEM_AVAILABLE}MB memory available${NC}"
+    ((WARNINGS++))
+else
+    echo -e "${GREEN}✅ Memory available: ${MEM_AVAILABLE}MB${NC}"
+fi
+
+# Check container health
+echo ""
+echo "Container Health Status:"
+for container in $(docker ps --format "{{.Names}}"); do
+    HEALTH=$(docker inspect --format='{{.State.Health.Status}}' $container 2>/dev/null || echo "none")
+    STATUS=$(docker inspect --format='{{.State.Status}}' $container 2>/dev/null || echo "unknown")
+    
+    if [ "$HEALTH" = "unhealthy" ]; then
+        echo -e "  ${RED}❌ $container is unhealthy${NC}"
+        ((ERRORS++))
+    elif [ "$STATUS" != "running" ]; then
+        echo -e "  ${RED}❌ $container is not running (status: $STATUS)${NC}"
+        ((ERRORS++))
+    elif [ "$HEALTH" = "healthy" ]; then
+        echo -e "  ${GREEN}✅ $container is healthy${NC}"
+    else
+        echo -e "  ${GREEN}✅ $container is running${NC}"
+    fi
+done
+
+# Check database connections
+echo ""
+echo "Database Connection Pool:"
+if docker exec postgres_dw psql -U postgres -t -c "SELECT 1;" &>/dev/null; then
+    CONN_COUNT=$(docker exec postgres_dw psql -U postgres -t -c "SELECT count(*) FROM pg_stat_activity;" 2>/dev/null | tr -d ' ')
+    MAX_CONN=$(docker exec postgres_dw psql -U postgres -t -c "SHOW max_connections;" 2>/dev/null | tr -d ' ')
+    CONN_PERCENT=$((CONN_COUNT * 100 / MAX_CONN))
+    
+    if [ "$CONN_PERCENT" -gt 80 ]; then
+        echo -e "  ${YELLOW}⚠️  WARNING: Database connections at ${CONN_PERCENT}% (${CONN_COUNT}/${MAX_CONN})${NC}"
+        ((WARNINGS++))
+    else
+        echo -e "  ${GREEN}✅ Database connections: ${CONN_COUNT}/${MAX_CONN} (${CONN_PERCENT}%)${NC}"
+    fi
+else
+    echo -e "  ${RED}❌ Cannot connect to database${NC}"
+    ((ERRORS++))
+fi
+
+# Check Airflow DAG status
+echo ""
+echo "Airflow Status:"
+if docker exec airflow_scheduler airflow dags list &>/dev/null; then
+    FAILED_DAGS=$(docker exec airflow_scheduler airflow dags list-runs -d failed 2>/dev/null | grep -c "failed" || echo "0")
+    if [ "$FAILED_DAGS" -gt 0 ]; then
+        echo -e "  ${YELLOW}⚠️  WARNING: ${FAILED_DAGS} failed DAG runs${NC}"
+        ((WARNINGS++))
+    else
+        echo -e "  ${GREEN}✅ No failed DAG runs${NC}"
+    fi
+else
+    echo -e "  ${YELLOW}⚠️  Airflow scheduler not accessible${NC}"
+fi
+
+# Summary
+echo ""
+echo "Summary:"
+echo "========"
+if [ "$ERRORS" -gt 0 ]; then
+    echo -e "${RED}❌ CRITICAL: ${ERRORS} error(s) found${NC}"
+    exit 2
+elif [ "$WARNINGS" -gt 0 ]; then
+    echo -e "${YELLOW}⚠️  WARNING: ${WARNINGS} warning(s) found${NC}"
+    exit 1
+else
+    echo -e "${GREEN}✅ All systems operational${NC}"
+    exit 0
+fi
+EOF
+    
+    chmod +x scripts/production-health-check.sh
+    log_success "Production health check script created"
+}
+
 # Main execution
 main() {
     create_pgadmin_config
     create_health_check
+    create_production_health_check
 }
 
 main
@@ -2174,6 +3671,22 @@ EOF
 
 # Create status script
 create_status_script() {
+    cat > scripts/status.sh << 'EOF'
+#!/bin/bash
+
+# Docker Compose wrapper function
+docker_compose() {
+    if command -v docker-compose >/dev/null 2>&1; then
+        docker-compose "$@"
+    else
+        docker compose "$@"
+    fi
+}
+
+echo "📊 Data Engineering Platform Status:"
+echo "===================================="
+docker_compose ps
+EOF
     chmod +x scripts/status.sh
 }
 
@@ -2209,31 +3722,63 @@ EOF
 create_backup_script() {
     cat > scripts/backup.sh << 'EOF'
 #!/bin/bash
+set -euo pipefail  # Exit on error, undefined variables, pipe failures
+
 BACKUP_DIR="./backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-DB_NAME="datawarehouse"
+DB_NAME="${POSTGRES_DB:-datawarehouse}"
 
+# Create backup directory
 mkdir -p $BACKUP_DIR
 
 echo "🔄 Starting backup..."
 
-# Database backup
-docker exec postgres_dw pg_dump \
+# Create backup with error handling
+if docker exec postgres_dw pg_dump \
     -U postgres \
     -d $DB_NAME \
     -F custom \
-    -f /tmp/backup_$TIMESTAMP.dump
+    -f /tmp/backup_$TIMESTAMP.dump 2>/dev/null; then
+    
+    # Copy from container
+    if docker cp postgres_dw:/tmp/backup_$TIMESTAMP.dump $BACKUP_DIR/; then
+        # Clean up container temp file
+        docker exec postgres_dw rm /tmp/backup_$TIMESTAMP.dump
+        
+        # Compress with keep original flag
+        if gzip -k $BACKUP_DIR/backup_$TIMESTAMP.dump 2>/dev/null; then
+            # Remove uncompressed only after successful compression
+            rm $BACKUP_DIR/backup_$TIMESTAMP.dump
+            echo "✅ Backup completed: $BACKUP_DIR/backup_$TIMESTAMP.dump.gz"
+            
+            # Verify backup file
+            if [[ -f "$BACKUP_DIR/backup_$TIMESTAMP.dump.gz" ]]; then
+                SIZE=$(ls -lh "$BACKUP_DIR/backup_$TIMESTAMP.dump.gz" | awk '{print $5}')
+                echo "📦 Backup size: $SIZE"
+            fi
+        else
+            echo "⚠️  Compression failed, keeping uncompressed backup"
+            echo "✅ Backup completed: $BACKUP_DIR/backup_$TIMESTAMP.dump"
+        fi
+    else
+        echo "❌ Failed to copy backup from container"
+        exit 1
+    fi
+else
+    echo "❌ Database backup failed"
+    echo "Debug: Check if postgres_dw container is running"
+    docker ps | grep postgres_dw
+    exit 1
+fi
 
-docker cp postgres_dw:/tmp/backup_$TIMESTAMP.dump $BACKUP_DIR/
-docker exec postgres_dw rm /tmp/backup_$TIMESTAMP.dump
-
-gzip $BACKUP_DIR/backup_$TIMESTAMP.dump
-
-echo "✅ Backup completed: $BACKUP_DIR/backup_$TIMESTAMP.dump.gz"
+# Cleanup old backups (keep last 7)
+echo "🧹 Cleaning old backups..."
+cd $BACKUP_DIR && ls -t backup_*.dump.gz 2>/dev/null | tail -n +8 | xargs -r rm
+cd - > /dev/null
+echo "✅ Backup maintenance complete"
 EOF
     chmod +x scripts/backup.sh
 }
-
 
 # Create volume backup script
 create_volume_backup_script() {
