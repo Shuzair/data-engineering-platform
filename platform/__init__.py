@@ -6,6 +6,6 @@ A modular, containerized data engineering platform.
 __version__ = "2.0.0"
 __author__ = "Your Name"
 
-from platform.core import Platform
+# from platform.core import Platform
 
 __all__ = ["Platform"]
